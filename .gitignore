@@ -1,0 +1,7 @@
+target
+.idea
+
+Cargo.lock
+build.rs
+code.c
+main.rs

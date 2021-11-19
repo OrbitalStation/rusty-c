@@ -1,0 +1,10 @@
+[package]
+name = "rusty-c"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies.rusty-c-macro]
+path = "rusty-c-macro"
+
+[features]
+debug = ["rusty-c-macro/debug"]
