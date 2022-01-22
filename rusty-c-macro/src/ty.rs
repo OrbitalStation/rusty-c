@@ -1,8 +1,84 @@
 use std::borrow::Cow;
 use core::mem::size_of;
+use std::cmp::Ordering;
 use bit_vec::BitVec;
 use crate::*;
 use check_keyword::CheckKeyword;
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ParsedTypePartSign {
+    Signed,
+    Unsigned
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ParsedTypePartQualifier {
+    Short,
+    Long
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ParsedTypePartType {
+    Void,
+    Bool,
+    Char,
+    Int,
+    Float,
+    Double
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ParsedTypePart {
+    Sign(ParsedTypePartSign),
+    Qualifier(ParsedTypePartQualifier),
+    Ty(ParsedTypePartType)
+}
+
+impl ParsedTypePart {
+    pub fn add_defaults(v: &mut Vec <Self>) {
+        if !matches!(v.last().unwrap(), Self::Ty(_)) {
+            v.push(ParsedTypePart::Ty(ParsedTypePartType::Int))
+        }
+        if !matches!(v.first().unwrap(), Self::Sign(_)) {
+            if *v.last().unwrap() == Self::Ty(ParsedTypePartType::Int) {
+                v.insert(0, Self::Sign(ParsedTypePartSign::Signed))
+            } else if *v.last().unwrap() == Self::Ty(ParsedTypePartType::Char) {
+                v.insert(0, Self::Sign(ParsedTypePartSign::Unsigned))
+            }
+        }
+    }
+}
+
+impl PartialOrd <Self> for ParsedTypePart {
+    fn partial_cmp(&self, other: &Self) -> Option <Ordering> {
+        Some(match self {
+            Self::Sign(_) => match other {
+                Self::Sign(_) => Ordering::Equal,
+                _ => Ordering::Less
+            },
+            Self::Qualifier(_) => match other {
+                Self::Sign(_) => Ordering::Greater,
+                Self::Qualifier(_) => Ordering::Equal,
+                Self::Ty(_) => Ordering::Less,
+            }
+            Self::Ty(_) => match other {
+                Self::Ty(_) => Ordering::Equal,
+                _ => Ordering::Greater
+            }
+        })
+    }
+}
+
+impl Ord for ParsedTypePart {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
 
 bitflags::bitflags! {
     pub struct TypeFlags: u8 {
@@ -18,9 +94,9 @@ bitflags::bitflags! {
         ///
         /// Needs `struct` before?
         ///
-        /// struct A {} --> needs `struct`(e.g. `struct A var`)
+        /// struct A {} --> needs `struct`(e.fun. `struct A var`)
         ///
-        /// typedef struct A B --> doesn't need `struct`(e.g. `B var`)
+        /// typedef struct A B --> doesn't need `struct`(e.fun. `B var`)
         ///
         const NEEDS_STRUCT = 1 << 1;
     }
@@ -36,7 +112,8 @@ pub enum TypeData {
     },
     Fun {
         args: Vec <Type>,
-        ret: Type
+        ret: Type,
+        flags: FnFlags
     },
     Alias {
         name: String,
@@ -64,13 +141,15 @@ impl TypeData {
     pub fn rusty(&self) -> Cow <String> {
         match self {
             Self::Ord { rustname, .. } => Cow::Borrowed(rustname),
-            Self::Fun { args, ret } => Cow::Owned(format!("fn({}){}", {
+            Self::Fun { args, ret, flags } => Cow::Owned(format!("fn({}){}", {
                 let mut s = String::new();
                 for arg in args {
                     s.push_str(&arg.rusty());
                     s.push_str(", ")
                 }
-                if !args.is_empty() {
+                if flags.contains(FnFlags::VARIADIC) {
+                    s.push_str("...");
+                } else if !s.is_empty() {
                     s.pop();
                     s.pop();
                 }
@@ -112,11 +191,22 @@ impl Eq for Type {}
 
 impl PartialEq for Type {
     fn eq(&self, other: &Self) -> bool {
-        self.data as *const _ as usize == other.data as *const _ as usize && self.ptr == other.ptr
+        let me = self.real();
+        let other = other.real();
+        me.data as *const _ as usize == other.data as *const _ as usize && me.ptr == other.ptr
     }
 }
 
 impl Type {
+    fn real(&self) -> Self {
+        let mut me = self.clone();
+        while let TypeData::Alias { ty, .. } = me.data {
+            me.ptr.extend(ty.ptr.iter());
+            me.data = ty.data;
+        }
+        me
+    }
+
     #[inline]
     pub fn types() -> &'static mut Vec <TypeData> {
         static mut TYPES: Vec <TypeData> = Vec::new();
@@ -162,13 +252,14 @@ impl Type {
         let c_args = fun.vars[..fun.args].iter().map(|arg| arg.ty.clone()).collect();
 
         match Self::types().iter().find(|x| match x {
-            TypeData::Fun { args, ret } if *args == c_args && *ret == fun.ret => true,
+            TypeData::Fun { args, ret, .. } if *args == c_args && *ret == fun.ret => true,
             _ => false
         }) {
             None => {
                 Self::types().push(TypeData::Fun {
                     args: c_args,
-                    ret: fun.ret.clone()
+                    ret: fun.ret.clone(),
+                    flags: fun.flags
                 });
 
                 Self::types().last().unwrap()
@@ -199,18 +290,18 @@ impl Type {
         result
     }
 
-    // pub fn c_type(&self) -> String {
-    //     let mut result = const_and_space_or_nothing_depends_on_mutability(self.mutable).to_string() + &self.data.cname;
-    //     for ptr in &self.ptr {
-    //         result.push('*');
-    //         result.push_str(const_and_space_or_nothing_depends_on_mutability(ptr));
-    //         result.push(' ');
-    //     }
-    //     if !self.ptr.is_empty() {
-    //         result.pop();
-    //     }
-    //     result
-    // }
+    pub fn c_type(&self) -> String {
+        let mut result = const_and_space_or_nothing_depends_on_mutability(self.mutable).to_string() + &self.data.cname();
+        for ptr in &self.ptr {
+            result.push('*');
+            result.push_str(const_and_space_or_nothing_depends_on_mutability(ptr));
+            result.push(' ');
+        }
+        if !self.ptr.is_empty() {
+            result.pop();
+        }
+        result
+    }
 
     fn is_template(&self, fun: impl Fn(&Self) -> bool) -> bool {
         match self.data {
@@ -250,7 +341,7 @@ impl Type {
     }
 
     pub fn is_arithmetic(&self) -> bool {
-        self.is_float() || self.is_integer()
+        self.is_float() || self.is_integer() || self.is_pointer() || *self == Self::bool()
     }
 
     pub fn convert(a: &mut Expr, ty: &Self) {
@@ -258,7 +349,28 @@ impl Type {
             ExprType::Integer if ty.is_integer() => (),
             ExprType::Float if ty.is_float() => (),
             ExprType::Ord(ty2) if ty == ty2 => return,
-            _ => a.value = format!("{} as {}", parentify(a.value.clone()), ty.rusty())
+            _ => {
+                let ty2 = a.ty.to_type();
+                if ty2.is_arithmetic() && ty.is_arithmetic() {
+                    if ty2.is_pointer() && !ty.is_integer() {
+                        Self::convert(a, &Self::usize())
+                    }
+                    let ty2 = a.ty.to_type();
+                    if *ty == Self::bool() {
+                        a.value = format!("{} != {}", parentify(a.value.clone()), if ty2.is_integer() {
+                            "0"
+                        } else {
+                            "0."
+                        })
+                    } else {
+                        a.value = format!("{} as {}", parentify(a.value.clone()), ty.rusty())
+                    }
+                } else if *ty == Self::void() {
+                    a.value = String::from("()")
+                } else {
+                    panic!("cannot convert `{}` to `{}`", ty2.c_type(), ty.c_type())
+                }
+            }
         }
         a.ty = ExprType::Ord(ty.clone())
     }
@@ -294,7 +406,7 @@ macro_rules! add_builtins {
     ($( $ty:ty = $name:ident($idx:literal) ),* $( , )?) => {
         impl Type {
             pub fn add_builtins() {
-                $( Self::add_ord(String::new(), stringify!($ty), size_of::<$ty>(), TypeFlags::MUTABLE); )*
+                $( Self::add_ord(stringify!($name), stringify!($ty), size_of::<$ty>(), TypeFlags::MUTABLE); )*
             }
 
             pub fn is_builtin(&self) -> bool {
@@ -336,5 +448,6 @@ add_builtins! {
     i64  = long(8),
     u64  = ulong(9),
     f32  = float(10),
-    f64  = double(11)
+    f64  = double(11),
+    core::ffi::VaList = va_list(12)
 }

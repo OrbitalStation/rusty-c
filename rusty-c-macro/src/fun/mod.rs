@@ -1,3 +1,5 @@
+mod builtin;
+
 use crate::*;
 
 bitflags::bitflags! {
@@ -16,9 +18,38 @@ bitflags::bitflags! {
         /// Is function extern or not
         ///
         const EXTERN = 1 << 3;
+
+        ///
+        /// Is function variadic or not
+        ///
+        const VARIADIC = 1 << 4;
     }
 }
 
+bitflags::bitflags! {
+    pub struct VariableFlags: u8 {
+        ///
+        /// Is variable mutable or not
+        ///
+        const MUTABLE = 1 << 0;
+
+        ///
+        /// Is variable chosen as representative of `...`
+        ///
+        /// Applyable only to `va_list` variables
+        ///
+        const CHOSEN_AS_VA_LIST = 1 << 1;
+
+        ///
+        /// Is variable, chosen as representative of `...`, finished using `va_end`
+        ///
+        /// Applyable only to `va_list` variables
+        ///
+        const FINISHED_VA_LIST = 1 << 2;
+    }
+}
+
+#[derive(Debug)]
 pub struct Function {
     pub name: String,
     pub ret: Type,
@@ -40,7 +71,7 @@ impl Function {
     }
 
     pub fn leave_current() {
-        let current = Self::functions().iter_mut().rev().enumerate().find(|(_, fun)| fun.flags.contains(FnFlags::IS_INSIDE)).unwrap().0;
+        let current = Self::functions().len() - 1 - Self::functions().iter_mut().rev().enumerate().find(|(_, fun)| fun.flags.contains(FnFlags::IS_INSIDE)).unwrap().0;
         Self::functions().drain(current + 1..);
         let current = &mut Self::functions()[current];
         for ty in core::mem::replace(&mut current.local_types, vec![]) {
@@ -54,19 +85,22 @@ impl Function {
     }
 
     pub fn add(new: Self) {
-        Self::functions().push(new)
+        Self::functions().push(new);
     }
 
-    pub fn make_unsafe(&mut self, _value: &mut String) {
-        self.flags.remove(FnFlags::SAFE);
-        // *value = format!("unsafe {{ {} }}", value)
+    pub fn make_unsafe(&mut self, value: &mut String) {
+        if self.name == "main" {
+            *value = format!("unsafe {{ {} }}", value)
+        } else {
+            self.flags.remove(FnFlags::SAFE)
+        }
     }
 
     pub fn request_make_variable_mutable(name: &str) -> Option <bool> {
         Self::current().expect("not in function").vars.iter_mut().find(|var| var.name == name).map(|var| if !var.ty.mutable {
             false
         } else {
-            var.mutable = true;
+            var.flags.insert(VariableFlags::MUTABLE);
             true
         })
     }
@@ -85,7 +119,7 @@ impl Function {
 pub struct Variable {
     pub name: String,
     pub ty: Type,
-    pub mutable: bool
+    pub flags: VariableFlags
 }
 
 impl PartialEq for Variable {

@@ -1,9 +1,9 @@
 use crate::*;
 use check_keyword::CheckKeyword;
 
-pub use clang::clang;
+pub use grammar::*;
 
-peg::parser! { grammar clang() for str {
+peg::parser! { grammar grammar() for str {
 
     /// Parse whitespace
     rule _ = [' ' | '\t' | '\n']*
@@ -20,10 +20,12 @@ peg::parser! { grammar clang() for str {
     }
 
     /// Parse 1 letter
-    rule letter() -> &'input str = x:$(['a'..='z' | 'A'..='Z' | '_'])
+    rule letter() -> &'input str = x:$([_]) {?
+        letter(x)
+    }
 
     /// Parse an identifier(and add `r#` if is a keyword)
-    rule ident() -> String = x:$(letter() (letter() / digit(10))*) {
+    pub rule ident() -> String = x:$(letter() (letter() / digit(10))*) {
         x.to_safe()
     }
 
@@ -36,11 +38,9 @@ peg::parser! { grammar clang() for str {
         = x:$(['+' | '-' | '*' | '/' | '%' | '&' | '|' | '=' | '<' | '>' | '!' | '^' | '~'])
 
     /// Parse integer number in possible notations
-    rule int_number() -> String
-        = digits:$("0" ("x" / "X") (digit(16) / "'")+) { digits.replace('\'', "_") }
-        / digits:$("0" (digit(8) / "'")+) { digits.replace('\'', "_") }
-        / digits:$((digit(10) / "'")+) { digits.replace('\'', "_") }
-        / digits:$("0b" (digit(2) / "'")+) { digits.replace('\'', "_") }
+    rule int_number() -> String = digits:$(("0" ("x" / "X") (digit(16) / "'")+) / ("0" (digit(8) / "'")+) / ((digit(10) / "'")+) / ("0b" (digit(2) / "'")+)) {
+        digits.replace('\'', "_")
+    }
 
     /// Helper for `__single_comment` rule
     rule __single_comment_helper() -> String
@@ -106,27 +106,53 @@ peg::parser! { grammar clang() for str {
         = _ "*" _ "const" force_whitespace_if_ident() { false }
         / _ "*" { true }
 
+    rule __pure_type_part() -> ParsedTypePart
+        = "signed" { ParsedTypePart::Sign(ParsedTypePartSign::Signed) }
+        / "unsigned" { ParsedTypePart::Sign(ParsedTypePartSign::Unsigned) }
+
+        / "short" { ParsedTypePart::Qualifier(ParsedTypePartQualifier::Short) }
+        / "long" { ParsedTypePart::Qualifier(ParsedTypePartQualifier::Long) }
+
+        / "void" { ParsedTypePart::Ty(ParsedTypePartType::Void) }
+        / "_Bool" { ParsedTypePart::Ty(ParsedTypePartType::Bool) }
+        / "char" { ParsedTypePart::Ty(ParsedTypePartType::Char) }
+        / "int" { ParsedTypePart::Ty(ParsedTypePartType::Int) }
+        / "float" { ParsedTypePart::Ty(ParsedTypePartType::Float) }
+        / "double" { ParsedTypePart::Ty(ParsedTypePartType::Double) }
+
+
     /// Parse pure(i.e. without qualifiers) type
     rule __pure_type() -> Type
-        = "void" { Type::void() }
-        / "_Bool" { Type::bool() }
-        / "signed" _ "char" { Type::schar() }
-        / ("unsigned" _ "char" / "char") { Type::char() }
-        / ("signed" _ "short" _ "int" / "signed" _ "short" / "short" _ "int" / "short") { Type::short() }
-        / ("unsigned" _ "short" _ "int" / "unsigned" _ "short") { Type::ushort() }
-        / ("signed" _ "long" _ "long" _ "int" / "long" _ "long" _ "int" / "signed" _ "long" _ "long" / "signed" _ "long" _ "int" / "signed" _ "long" / "long" _ "int" / "long" _ "long" / "long") { Type::long() }
-        / ("unsigned" _ "long" _ "long" _ "int" / "unsigned" _ "long" _ "int" / "unsigned" _ "long" _ "long" / "unsigned" _ "long") { Type::ulong() }
-        / "float" { Type::float() }
-        / "double" { Type::double() }
-        / ("signed" _ "int" / "int" / "signed") { Type::int() }
-        / ("unsigned" _ "int" / "unsigned") { Type::uint() }
+        = parts:__pure_type_part() ++ _ {
+            use {ParsedTypePart::*, ParsedTypePartType::*, ParsedTypePartQualifier::*, ParsedTypePartSign::*};
+
+            let mut parts = parts;
+            parts.sort();
+            ParsedTypePart::add_defaults(&mut parts);
+            match parts[..] {
+                [Ty(Void)] => Type::void(),
+                [Ty(Bool)] => Type::bool(),
+                [Sign(Signed), Ty(Char)] => Type::schar(),
+                [Sign(Unsigned), Ty(Char)] => Type::char(),
+                [Sign(Signed), Qualifier(Short), Ty(Int)] => Type::short(),
+                [Sign(Unsigned), Qualifier(Short), Ty(Int)] => Type::ushort(),
+                [Sign(Signed), Ty(Int)] => Type::int(),
+                [Sign(Unsigned), Ty(Int)] => Type::uint(),
+                [Sign(Signed), Qualifier(Long), Ty(Int)] | [Sign(Signed), Qualifier(Long), Qualifier(Long), Ty(Int)] => Type::long(),
+                [Sign(Unsigned), Qualifier(Long), Ty(Int)] | [Sign(Unsigned), Qualifier(Long), Qualifier(Long), Ty(Int)] => Type::ulong(),
+                [Ty(Float)] => Type::float(),
+                [Ty(Double)] => Type::double(),
+                _ => panic!("unknown builtin type configuration: {:?}", parts)
+            }
+        }
+        / "__builtin_va_list" { Type::va_list() }
         / structural:("struct" __)? ty:ident() {?
             let about_struct = if structural.is_some() { |x: bool| x } else { |x: bool| !x };
             Type::find(|data| data.cname() == ty && about_struct(data.needs_struct()))
         }
 
     /// Parse complete type
-    rule ty() -> Type = constness:("const" __)? ty:__pure_type() ptr:__pure_and_complex_pointer()* {
+    pub rule ty() -> Type = constness:("const" __)? ty:__pure_type() ptr:__pure_and_complex_pointer()* {
         let mut ty = ty;
         let mut ptr = ptr;
         let mut mutable = constness.is_none();
@@ -151,11 +177,16 @@ peg::parser! { grammar clang() for str {
         = (keyword() / ty()) {? Err("ident") }
         / ident:ident() { ident }
 
-    /// Parse variable of form `<ty> <name`
+    /// Parse variable of form `<ty> <name>`
     rule variable(reset_mutability: bool) -> Variable = ty:ty() _ name:only_ident() {
+        let mut flags = VariableFlags::empty();
+        if !reset_mutability && ty.mutable {
+            flags.insert(VariableFlags::MUTABLE)
+        }
+
         Variable {
             name,
-            mutable: !reset_mutability && ty.mutable,
+            flags,
             ty
         }
     }
@@ -190,6 +221,11 @@ peg::parser! { grammar clang() for str {
        Err("unknown variable")
     }
 
+    /// Check builtin function
+    rule __builtin_function() -> Expr = name:ident() _ "(" _ args:$([^ ',' | ')']*) ** ("," _) ")" {?
+        Function::check_builtin(&name, &args).ok_or("builtin")
+    }
+
     /// Parse an expression
     rule expr() -> Expr = precedence! {
         variable:@ _ "=" _ value:(@) {
@@ -200,12 +236,12 @@ peg::parser! { grammar clang() for str {
                 ExprType::Ord(ref mut ty) => ty
             };
             Type::convert(&mut value, variable_ty);
-            if variable.value.find(|c: char| !c.is_alphanumeric()).is_none() {
+            if variable.value.find(not_full_letter).is_none() {
                 assert!(request_variable_to_be_mutable(&variable.value), "`{}` is not mutable", variable.value);
                 variable_ty.mutable = true
             }
             assert!(variable_ty.mutable, "cannot assign to an immutable value");
-            variable.value = format!("rusty_c::ops::assign(&mut {}, {})", variable.value, value.value);
+            variable.value = format!("rusty_c::assign!({}, {})", variable.value, value.value);
             variable
         }
 
@@ -291,23 +327,38 @@ peg::parser! { grammar clang() for str {
 
             ty.mutable = ty.ptr.pop().unwrap();
 
-            x.value.insert(0, '*');
+            x.value = format!("*{}", parentify(x.value));
 
             fun.make_unsafe(&mut x.value);
 
             x
         }
 
+        "!" _ x:(@) {
+            let mut x = x;
+            Type::convert(&mut x, &Type::bool());
+            x.value = format!("!{}", parentify(x.value));
+            x
+        }
+
+        "(" _ ty:ty() _ ")" _ expr:expr() {
+            let mut expr = expr;
+            Type::convert(&mut expr, &ty);
+            expr
+        }
+
         --
 
         call:(@) _ "(" _ args:expr() ** ("," _) ")" {
+            let cur = Function::current().expect("cannot call function not in function");
+
             let mut args = args;
 
-            let (c_args, c_ret, spec_extern, name) = match call.ty {
+            let (c_args, c_ret, spec_extern, name, variadic) = match call.ty {
                 ExprType::Ord(ty) => match ty.data {
-                    TypeData::Fun { args, ret } => {
-                        let mut result = (args, ret, false, "");
-                        if call.value.find(|c: char| !c.is_alphanumeric()).is_none() {
+                    TypeData::Fun { args, ret, flags } => {
+                        let mut result = (args, ret, false, "", flags.contains(FnFlags::VARIADIC));
+                        if call.value.find(not_full_letter).is_none() {
                             match Function::get(|fun| fun.name == call.value) {
                                 Some(fun) => {
                                     result.2 = fun.flags.contains(FnFlags::EXTERN);
@@ -323,12 +374,16 @@ peg::parser! { grammar clang() for str {
                 _ => panic!("cannot call non-function")
             };
 
-            assert!(args.len() == c_args.len(), "wrong number of args: expected {}, found {}", c_args.len(), args.len());
+            if variadic {
+                assert!(args.len() >= c_args.len(), "not enough arguments: expected {}+, found {}", c_args.len(), args.len())
+            } else {
+                assert_eq!(args.len(), c_args.len(), "wrong number of args: expected {}, found {}", c_args.len(), args.len())
+            }
 
             let result = format!("{}{}({}){}",
                 if spec_extern {
                     let mut t = String::new();
-                    Function::current().expect("cannot call function not in function").make_unsafe(&mut t);
+                    cur.make_unsafe(&mut t);
                     if t.is_empty() {
                         "~~1"
                     } else {
@@ -341,8 +396,12 @@ peg::parser! { grammar clang() for str {
                 {
                     let mut s = String::new();
                     let mut i = 0;
-                    while i < args.len() {
+                    while i < c_args.len() {
                         Type::convert(&mut args[i], &c_args[i]);
+                        s.push_str(&format!("{}, ", args[i].value));
+                        i += 1
+                    }
+                    while i < args.len() {
                         s.push_str(&format!("{}, ", args[i].value));
                         i += 1
                     }
@@ -362,10 +421,20 @@ peg::parser! { grammar clang() for str {
             Expr::new(result, ExprType::Ord(c_ret.clone()))
         }
 
+        builtin:__builtin_function() {
+            builtin
+        }
+
         --
 
         number:int_number() {
             Expr::integer(number)
+        }
+
+        "__func__" {
+            let mut ptr = Type::char();
+            ptr.ptr.push(false);
+            Expr::new(plain_text_to_lit_string(Function::current().map(|fun| &fun.name).unwrap_or(&String::new())), ExprType::Ord(ptr))
         }
 
         ident:__expr_ident() {
@@ -386,7 +455,7 @@ peg::parser! { grammar clang() for str {
     }
 
     /// Helper `rule` to add function <i>before</i> body
-    rule __add_fn_and_skip_whitespaces(ret: Type, name: String, args: Vec <Variable>) = _ {
+    rule __add_fn_and_skip_whitespaces(ret: Type, name: String, args: Vec <Variable>, variadic: Option <()>) = _ {
         match Function::functions().iter().enumerate().find(|(_, fun)| fun.name == name) {
             None => (),
             Some((idx, fun)) => if fun.flags.contains(FnFlags::EXTERN) {
@@ -396,12 +465,26 @@ peg::parser! { grammar clang() for str {
                 panic!("function {} already exists", name)
             }
         }
+
+        let mut flags = FnFlags::IS_INSIDE | FnFlags::SAFE;
+        if variadic.is_some() {
+            flags.insert(FnFlags::VARIADIC);
+            flags.remove(FnFlags::SAFE)
+        }
+
+        Global::get().allow_return_sugar = true;
+
+        let mut ret = ret;
+        if name == "main" {
+            ret = Type::void()
+        }
+
         Function::add(Function {
             name,
             ret,
             args: args.len(),
             vars: args,
-            flags: FnFlags::IS_INSIDE | FnFlags::SAFE,
+            flags,
             local_types: Vec::new()
         })
     }
@@ -412,28 +495,65 @@ peg::parser! { grammar clang() for str {
     /// `return` helper #2
     rule __return_helper2() -> () = &"}"
 
+    /// Helper for init-in-place variable statement
+    rule __variable_init() -> Expr = _ "=" _ expr:expr() {
+        expr
+    }
+
+    /// Helper for remembering `Global::allow_return_sugar` and resetting it
+    rule __remember_return_sugar_and_reset() -> bool = _ {
+        let sugar = Global::get().allow_return_sugar;
+        Global::get().allow_return_sugar = false;
+        sugar
+    }
+
+    rule __stmt_body() -> String
+        = "{" _ body:raw_clang("\n\t")? _ "}" { body.unwrap_or_default() }
+        / body:stmt() { "\t".to_string() + &body }
+
     /// Parse statement
     rule stmt() -> String = precedence! {
+        // `if` statement
+        "if" _ "(" _ cond:expr() _ ")" sugar:__remember_return_sugar_and_reset() body:__stmt_body() {
+            let mut cond = cond;
+            Type::convert(&mut cond, &Type::bool());
+            Global::get().allow_return_sugar = sugar;
+            format!("if {} {{\n{}\n}}", cond.value, body)
+        }
+
+        // `while` statement
+        "while" _ "(" _ cond:expr() _ ")" sugar:__remember_return_sugar_and_reset() body:__stmt_body() {
+            let mut cond = cond;
+            Type::convert(&mut cond, &Type::bool());
+            Global::get().allow_return_sugar = sugar;
+            format!("while {} {{\n{}\n}}", cond.value, body)
+        }
+
+        // Ordinary `expression` statement
+        expr:expr() _ ";" {
+            expr.value + ";"
+        }
+
         // `return` statement
         "return" ret:__return_helper()? _ ";" _ is_last:__return_helper2()? {
             let cur = Function::current().expect("return outside of function");
-            let is_not_last = is_last.is_none();
+            let is_not_last = is_last.is_none() || !Global::get().allow_return_sugar;
             let result = match ret {
-                None => {
-                    assert_eq!(cur.ret, Type::void(), "expected value");
-                    if is_not_last {
-                        String::from("return;")
-                    } else {
-                        String::new()
-                    }
-                },
-                Some(mut e) => {
+                Some(mut e) if cur.name != "main" => {
                     assert_ne!(cur.ret, Type::void(), "unexpected value");
                     Type::convert(&mut e, &cur.ret);
                     if is_not_last {
                         format!("return {};", e.value)
                     } else {
                         e.value
+                    }
+                },
+                _ => {
+                    assert_eq!(cur.ret, Type::void(), "expected value");
+                    if is_not_last {
+                        String::from("return;")
+                    } else {
+                        String::new()
                     }
                 }
             };
@@ -446,7 +566,11 @@ peg::parser! { grammar clang() for str {
             let result = if name.is_keyword() {
                 String::new()
             } else {
-                format!("type {} = {};", name, ty.rusty())
+                if ty == Type::va_list() {
+                    format!("type {} <'a, 'f> = {} <'a, 'f>;", name, ty.rusty())
+                } else {
+                    format!("type {} = {};", name, ty.rusty())
+                }
             };
             match Function::current() {
                 None => (),
@@ -460,7 +584,7 @@ peg::parser! { grammar clang() for str {
         }
 
         // Function declaration
-        ("extern" __)? ret:ty() _ name:only_ident() _ "(" _ args:variable(true) ** ("," _) ")" _ ";" {
+        ("extern" __)? ret:ty() _ name:only_ident() _ "(" _ args:variable(true) ** ("," _) variadic:("," _ "..." _)? ")" _ ";" {
             match Function::get(|fun| fun.name == name) {
                 Some(fun) => {
                     fun.assume_same_signature(&ret, &args);
@@ -468,12 +592,16 @@ peg::parser! { grammar clang() for str {
                 },
                 None => {
                     let x = format!("~~~{}\n", name);
+                    let mut flags = FnFlags::EXTERN;
+                    if variadic.is_some() {
+                        flags.insert(FnFlags::VARIADIC)
+                    }
                     Function::add(Function {
                         name,
                         ret,
                         args: args.len(),
                         vars: args,
-                        flags: FnFlags::EXTERN,
+                        flags,
                         local_types: Vec::new()
                     });
                     x
@@ -482,15 +610,21 @@ peg::parser! { grammar clang() for str {
         }
 
         // Function definition
-        comments:comments()? _ ret:ty() _ name:only_ident() _ "(" _ args:variable(true) ** ("," _) ")" __add_fn_and_skip_whitespaces(ret, name, args) "{" _ body:raw_clang("\n\t")? _ "}" {
+        comments:comments()? _ ret:ty() _ name:only_ident() _ "(" _ args:variable(true) ** ("," _) variadic:("," _ "..." _)? ")" __add_fn_and_skip_whitespaces(ret, name, args, variadic) "{" _ body:raw_clang("\n\t")? _ "}" {
             let me = Function::current().unwrap();
             let result = format!(
-                "{comments}{unsafety}fn {name}({args}){ret} {{\n{body}\n}}\n",
+                "{comments}{unsafety}{extern_c}fn {name}({args}){ret} {{\n{body}\n}}\n",
 
                 unsafety = if me.flags.contains(FnFlags::SAFE) {
                     ""
                 } else {
                     "unsafe "
+                },
+
+                extern_c = if me.flags.contains(FnFlags::VARIADIC) {
+                    "extern \"C\" "
+                } else {
+                    ""
                 },
 
                 comments = match comments {
@@ -516,15 +650,54 @@ peg::parser! { grammar clang() for str {
             result
         }
 
+        // Variable definition statement
+        ty:ty() _ name:only_ident() init:__variable_init()? _ ";" {
+            match Function::current() {
+                Some(fun) => {
+                    assert!(fun.vars.iter().find(|var| var.name == name).is_none(), "variable `{}` already exists", name);
+
+                    let mut flags = VariableFlags::empty();
+
+                    if ty.mutable {
+                        flags.insert(VariableFlags::MUTABLE)
+                    }
+
+                    let mut result = format!("{}let {}{}", if ty == Type::va_list() {
+                        "~"
+                    } else {
+                        ""
+                    }, mut_and_space_or_nothing_depends_on_mutability(ty.mutable), name);
+
+                    match init {
+                        None => result.push_str(&format!(": {}", ty.rusty())),
+                        Some(mut init) => {
+                            Type::convert(&mut init, &ty);
+                            result.push_str(&format!(" = {}", init.value))
+                        }
+                    }
+
+                    result.push(';');
+
+                    fun.vars.push(Variable {
+                        name,
+                        ty,
+                        flags
+                    });
+
+                    result
+                },
+                None => todo!("no static support yet")
+            }
+        }
+
         // Comments
         comments:comments() {
             format!("//{}", comments.replace("\n", "\n//"))
         }
 
-        // Ordinary `expression` statement
-        expr:expr() _ ";" {
-            expr.value + ";"
-        }
+        // other:$([^ '\n']+) {
+        //     panic!("unknown syntax:\n\t`{}`", other)
+        // }
     }
 
     /// Parse whole code

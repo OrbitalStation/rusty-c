@@ -9,8 +9,10 @@ pub const fn sizeof <T> () -> TrueUsize {
     core::mem::size_of::<T>() as _
 }
 
-#[inline]
-pub fn assign <T: Copy> (x: &mut T, y: T) -> T {
-    *x = y;
-    y
+#[macro_export]
+macro_rules! assign {
+    ($var:expr, $val:expr) => {{
+        $var = $val;
+        $var
+    }};
 }

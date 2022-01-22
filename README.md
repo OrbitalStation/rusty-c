@@ -3,7 +3,7 @@
 ### Usage:
 Add `rusty-c` of last version to your dependencies and use it:
 
-###Example:
+### Example:
 
 main.c
 ```c

@@ -22,13 +22,13 @@ pub fn mut_and_space_or_nothing_depends_on_mutability(mutable: bool) -> &'static
     }
 }
 
-// pub fn const_and_space_or_nothing_depends_on_mutability(mutable: bool) -> &'static str {
-//     if mutable {
-//         ""
-//     } else {
-//         "const "
-//     }
-// }
+pub fn const_and_space_or_nothing_depends_on_mutability(mutable: bool) -> &'static str {
+    if mutable {
+        ""
+    } else {
+        "const "
+    }
+}
 
 pub fn parentify(mut s: String) -> String {
     if s.contains(' ') && !is_surrounded_with_parents(&s) {
@@ -84,9 +84,17 @@ pub fn request_variable_to_be_mutable(name: &str) -> bool {
 pub fn function_args(me: &Function) -> String {
     let mut s = String::new();
     for arg in &me.vars[..me.args] {
-        s.push_str(&format!("{}{}: {}, ", mut_and_space_or_nothing_depends_on_mutability(arg.mutable), arg.name, arg.ty.rusty()))
+        s.push_str(&format!("{}{}: {}, ", mut_and_space_or_nothing_depends_on_mutability(arg.flags.contains(VariableFlags::MUTABLE)), arg.name, arg.ty.rusty()))
     }
-    if !s.is_empty() {
+    if me.flags.contains(FnFlags::VARIADIC) {
+        assert!(!s.is_empty(), "variadic function requires at least one normal parameter");
+        if !me.flags.contains(FnFlags::EXTERN) {
+            if let Some(var) = me.vars[me.args..].iter().find(|var| var.flags.contains(VariableFlags::CHOSEN_AS_VA_LIST)) {
+                s.push_str(&format!("mut {}: ", var.name))
+            }
+        }
+        s.push_str("...");
+    } else if !s.is_empty() {
         s.pop();
         s.pop();
     }
@@ -99,4 +107,13 @@ pub fn function_return_type(me: &Function) -> String {
     } else {
         format!(" -> {}", me.ret.rusty())
     }
+}
+
+pub fn letter(x: &str) -> Result <&str, &'static str> {
+    let char = x.chars().next().unwrap();
+    if char.is_alphabetic() || char == '_' { Ok(x) } else { Err("") }
+}
+
+pub fn not_full_letter(char: char) -> bool {
+    !(char.is_alphanumeric() || char == '_')
 }
