@@ -127,3 +127,9 @@ impl PartialEq for Variable {
         self.name == other.name && self.ty == other.ty
     }
 }
+
+impl Variable {
+    pub fn as_struct(&self) -> String {
+        format!("\t{}: {},\n", self.name, self.ty.rusty())
+    }
+}

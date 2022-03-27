@@ -5,81 +5,6 @@ use bit_vec::BitVec;
 use crate::*;
 use check_keyword::CheckKeyword;
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-#[repr(u8)]
-pub enum ParsedTypePartSign {
-    Signed,
-    Unsigned
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-#[repr(u8)]
-pub enum ParsedTypePartQualifier {
-    Short,
-    Long
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-#[repr(u8)]
-pub enum ParsedTypePartType {
-    Void,
-    Bool,
-    Char,
-    Int,
-    Float,
-    Double
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-#[repr(u8)]
-pub enum ParsedTypePart {
-    Sign(ParsedTypePartSign),
-    Qualifier(ParsedTypePartQualifier),
-    Ty(ParsedTypePartType)
-}
-
-impl ParsedTypePart {
-    pub fn add_defaults(v: &mut Vec <Self>) {
-        if !matches!(v.last().unwrap(), Self::Ty(_)) {
-            v.push(ParsedTypePart::Ty(ParsedTypePartType::Int))
-        }
-        if !matches!(v.first().unwrap(), Self::Sign(_)) {
-            if *v.last().unwrap() == Self::Ty(ParsedTypePartType::Int) {
-                v.insert(0, Self::Sign(ParsedTypePartSign::Signed))
-            } else if *v.last().unwrap() == Self::Ty(ParsedTypePartType::Char) {
-                v.insert(0, Self::Sign(ParsedTypePartSign::Unsigned))
-            }
-        }
-    }
-}
-
-impl PartialOrd <Self> for ParsedTypePart {
-    fn partial_cmp(&self, other: &Self) -> Option <Ordering> {
-        Some(match self {
-            Self::Sign(_) => match other {
-                Self::Sign(_) => Ordering::Equal,
-                _ => Ordering::Less
-            },
-            Self::Qualifier(_) => match other {
-                Self::Sign(_) => Ordering::Greater,
-                Self::Qualifier(_) => Ordering::Equal,
-                Self::Ty(_) => Ordering::Less,
-            }
-            Self::Ty(_) => match other {
-                Self::Ty(_) => Ordering::Equal,
-                _ => Ordering::Greater
-            }
-        })
-    }
-}
-
-impl Ord for ParsedTypePart {
-    #[inline]
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
-    }
-}
-
 bitflags::bitflags! {
     pub struct TypeFlags: u8 {
         ///
@@ -99,6 +24,15 @@ bitflags::bitflags! {
         /// typedef struct A B --> doesn't need `struct`(e.fun. `B var`)
         ///
         const NEEDS_STRUCT = 1 << 1;
+
+        ///
+        /// Is a struct?
+        ///
+        /// true -> struct
+        /// false & builtin -> -
+        /// false & non-builtin -> enum
+        ///
+        const STRUCT = 1 << 2;
     }
 }
 
@@ -221,19 +155,12 @@ impl Type {
         }
     }
 
-    pub fn assume_nonexisting(outer_name: &str, needs_struct: bool) {
+    pub fn assume_nonexisting(outer_name: &str, required: TypeFlags, forbidden: TypeFlags) {
         for ty in Self::types() {
             match ty {
-                TypeData::Ord { cname, flags, .. } => {
-                    if outer_name == cname && (if needs_struct {
-                        flags.contains(TypeFlags::NEEDS_STRUCT)
-                    } else {
-                        !flags.contains(TypeFlags::NEEDS_STRUCT)
-                    }) {
-                        panic!("type {} already exists", outer_name)
-                    }
-                },
-                TypeData::Alias { name, .. } if !needs_struct && outer_name == name => panic!("type {} already exists", outer_name),
+                TypeData::Ord { cname, flags, .. } if outer_name == cname && flags.contains(required)
+                    && !flags.contains(forbidden) => panic!("type {} already exists", outer_name),
+                TypeData::Alias { name, ty } if outer_name == name && !ty.data.needs_struct() => panic!("type {} already exists", outer_name),
                 _ => ()
             }
         }
@@ -450,4 +377,79 @@ add_builtins! {
     f32  = float(10),
     f64  = double(11),
     core::ffi::VaList = va_list(12)
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ParsedTypePartSign {
+    Signed,
+    Unsigned
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ParsedTypePartQualifier {
+    Short,
+    Long
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ParsedTypePartType {
+    Void,
+    Bool,
+    Char,
+    Int,
+    Float,
+    Double
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ParsedTypePart {
+    Sign(ParsedTypePartSign),
+    Qualifier(ParsedTypePartQualifier),
+    Ty(ParsedTypePartType)
+}
+
+impl ParsedTypePart {
+    pub fn add_defaults(v: &mut Vec <Self>) {
+        if !matches!(v.last().unwrap(), Self::Ty(_)) {
+            v.push(ParsedTypePart::Ty(ParsedTypePartType::Int))
+        }
+        if !matches!(v.first().unwrap(), Self::Sign(_)) {
+            if *v.last().unwrap() == Self::Ty(ParsedTypePartType::Int) {
+                v.insert(0, Self::Sign(ParsedTypePartSign::Signed))
+            } else if *v.last().unwrap() == Self::Ty(ParsedTypePartType::Char) {
+                v.insert(0, Self::Sign(ParsedTypePartSign::Unsigned))
+            }
+        }
+    }
+}
+
+impl PartialOrd <Self> for ParsedTypePart {
+    fn partial_cmp(&self, other: &Self) -> Option <Ordering> {
+        Some(match self {
+            Self::Sign(_) => match other {
+                Self::Sign(_) => Ordering::Equal,
+                _ => Ordering::Less
+            },
+            Self::Qualifier(_) => match other {
+                Self::Sign(_) => Ordering::Greater,
+                Self::Qualifier(_) => Ordering::Equal,
+                Self::Ty(_) => Ordering::Less,
+            }
+            Self::Ty(_) => match other {
+                Self::Ty(_) => Ordering::Equal,
+                _ => Ordering::Greater
+            }
+        })
+    }
+}
+
+impl Ord for ParsedTypePart {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
 }

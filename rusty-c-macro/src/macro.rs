@@ -5,14 +5,16 @@ pub use grammar::*;
 
 peg::parser! { grammar grammar() for str {
 
+    rule whitespace_single() = [' ' | '\t' | '\n']
+
     /// Parse whitespace
-    rule _ = [' ' | '\t' | '\n']*
+    rule _ = whitespace_single()*
 
     /// Like above, but required at least one
-    rule __ = [' ' | '\t' | '\n']+
+    rule __ = whitespace_single()+
 
     /// Parse 1 digit with the specified radix
-    rule digit(radix: u32) -> &'input str = digit:$(['0'..='9' | 'a'..='z' | 'A'..='Z']) {?
+    rule digit(radix: u32) -> &'input str = digit:$([_]) {?
         match digit.chars().next().unwrap().to_digit(radix) {
             Some(_) => Ok(digit),
             None => Err("digit")
@@ -146,9 +148,11 @@ peg::parser! { grammar grammar() for str {
             }
         }
         / "__builtin_va_list" { Type::va_list() }
-        / structural:("struct" __)? ty:ident() {?
-            let about_struct = if structural.is_some() { |x: bool| x } else { |x: bool| !x };
-            Type::find(|data| data.cname() == ty && about_struct(data.needs_struct()))
+        / "struct" __ ty:ident() {?
+            Type::find(|data| data.cname() == ty && data.needs_struct()).map_err(|_| "type")
+        }
+        / ty:ident() {?
+            Type::find(|data| data.cname() == ty && !data.needs_struct()).map_err(|_| "type")
         }
 
     /// Parse complete type
@@ -349,13 +353,30 @@ peg::parser! { grammar grammar() for str {
 
         --
 
+        // name:(@) _ "." _ field:only_ident() {
+        //     fn do_job(name: &str, ty: &Type) -> String {
+        //         match ty.data {
+        //             TypeData::Ord { flags, .. } if flags.contains(TypeFlags::STRUCT) => {
+        //                 Expr::new()
+        //             },
+        //             TypeData::Alias { ty, .. } => do_job(name, ty),
+        //             _ => panic!("cannot access field of non-struct")
+        //         }
+        //     }
+        //
+        //     match name.ty {
+        //         ExprType::Ord(ref ty) => do_job(&name.value, &ty),
+        //         _ => panic!("cannot access field of non-struct")
+        //     }
+        // }
+
         call:(@) _ "(" _ args:expr() ** ("," _) ")" {
             let cur = Function::current().expect("cannot call function not in function");
 
             let mut args = args;
 
-            let (c_args, c_ret, spec_extern, name, variadic) = match call.ty {
-                ExprType::Ord(ty) => match ty.data {
+            fn extract <'a> (call: &Expr, ty: &'a Type) -> (&'a Vec <Type>, &'a Type, bool, &'static str, bool) {
+                match ty.data {
                     TypeData::Fun { args, ret, flags } => {
                         let mut result = (args, ret, false, "", flags.contains(FnFlags::VARIADIC));
                         if call.value.find(not_full_letter).is_none() {
@@ -369,8 +390,13 @@ peg::parser! { grammar grammar() for str {
                         }
                         result
                     },
+                    TypeData::Alias { ty, .. } => extract(call, ty),
                     _ => panic!("cannot call non-function")
-                },
+                }
+            }
+
+            let (c_args, c_ret, spec_extern, name, variadic) = match call.ty {
+                ExprType::Ord(ref ty) => extract(&call, &ty),
                 _ => panic!("cannot call non-function")
             };
 
@@ -511,8 +537,57 @@ peg::parser! { grammar grammar() for str {
         = "{" _ body:raw_clang("\n\t")? _ "}" { body.unwrap_or_default() }
         / body:stmt() { "\t".to_string() + &body }
 
+    rule __struct_helper() -> Variable = v:variable(true) _ ";" { v }
+
+    rule __struct() -> (String, Vec <Variable>) = "struct" __ name:only_ident() _ "{" _ fields:__struct_helper() ** _ _ "}" {
+        (name, fields)
+    }
+
+    rule __struct_stmt() -> (String, Vec <Variable>, Option <String>)
+        = s:__struct() _ ";" { (s.0, s.1, None) }
+        / "typedef" __ "struct" __ name:only_ident()? _ "{" _ fields:__struct_helper() ** _ _ "}" _ alias:only_ident() _ ";" {
+            (alias, fields, Some(name.unwrap_or(String::new())))
+        }
+
     /// Parse statement
     rule stmt() -> String = precedence! {
+        // `struct` statement
+        s:__struct_stmt() {
+            let (name, fields, alias) = s;
+            Type::assume_nonexisting(&name, TypeFlags::NEEDS_STRUCT, TypeFlags::empty());
+            let mut s = String::new();
+            for v in fields {
+                s.push_str(&v.as_struct())
+            }
+            let result = format!("#[derive(Copy, Clone)]\n#[repr(C)]\nstruct {name} {{\n{s}}}");
+            let mut flags = TypeFlags::MUTABLE | TypeFlags::STRUCT;
+            if let Some(ref alias) = alias {
+                if !alias.is_empty() {
+                    flags.insert(TypeFlags::NEEDS_STRUCT)
+                }
+            }
+            Type::types().push(TypeData::Ord {
+                cname: name.clone(),
+                rustname: name,
+                size: 0,
+                flags
+            });
+            if let Some(alias) = alias {
+                if !alias.is_empty() {
+                    Type::assume_nonexisting(&alias, TypeFlags::empty(), TypeFlags::NEEDS_STRUCT);
+                    Type::types().push(TypeData::Alias {
+                        name: alias,
+                        ty: Type {
+                            data: &Type::types().last().unwrap(),
+                            ptr: Default::default(),
+                            mutable: true
+                        }
+                    })
+                }
+            }
+            result
+        }
+
         // `if` statement
         "if" _ "(" _ cond:expr() _ ")" sugar:__remember_return_sugar_and_reset() body:__stmt_body() {
             let mut cond = cond;
@@ -562,14 +637,15 @@ peg::parser! { grammar grammar() for str {
 
         // `typedef` statement
         "typedef" __ ty:ty() _ name:only_ident() _ ";" {
-            Type::assume_nonexisting(&name, false);
-            let result = if name.is_keyword() {
+            Type::assume_nonexisting(&name, TypeFlags::empty(), TypeFlags::NEEDS_STRUCT);
+            let rusty = ty.rusty();
+            let result = if name.is_keyword() || name == rusty {
                 String::new()
             } else {
                 if ty == Type::va_list() {
-                    format!("type {} <'a, 'f> = {} <'a, 'f>;", name, ty.rusty())
+                    format!("type {} <'a, 'f> = {} <'a, 'f>;", name, rusty)
                 } else {
-                    format!("type {} = {};", name, ty.rusty())
+                    format!("type {} = {};", name, rusty)
                 }
             };
             match Function::current() {

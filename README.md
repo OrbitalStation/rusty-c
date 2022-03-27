@@ -35,10 +35,10 @@ fn fibonacci(n: i32) -> i32 {
 ```
 
 ## Why not to use existing `c2rust`?
-Well, main reason is that `c2rust`'s output is... kinda scary =)
+Well, main reason is that `c2rust`'s output is... scary.
 
 And of course, `c2rust` supposes that <i>every</i> C function is unsafe,
-even if it is just a simple fibonacci.
+even if it's just a simple fibonacci.
 
 In order not to be unfounded, take a look at the example below.
 ```rust
@@ -56,7 +56,8 @@ pub unsafe extern "C" fn fibonacci(mut n: libc::c_int) -> libc::c_int {
            };
 }
 ```
-Wow, you know... <i>This</i> is what I call scary.
+Wow... <i>This</i> is what I call scary.
+Just compare to `rusty-c`'s version of this simple function.
 
 Anyway, choosing tool is only your decision.
-Be happy and - goodbye!
+Goodbye!
