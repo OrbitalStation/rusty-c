@@ -549,6 +549,9 @@ peg::parser! { grammar grammar() for str {
             (alias, fields, Some(name.unwrap_or(String::new())))
         }
 
+    rule __else() -> String
+        = _ "else" _ body:__stmt_body() { body }
+
     /// Parse statement
     rule stmt() -> String = precedence! {
         // `struct` statement
@@ -589,11 +592,14 @@ peg::parser! { grammar grammar() for str {
         }
 
         // `if` statement
-        "if" _ "(" _ cond:expr() _ ")" sugar:__remember_return_sugar_and_reset() body:__stmt_body() {
+        "if" _ "(" _ cond:expr() _ ")" sugar:__remember_return_sugar_and_reset() body:__stmt_body() else_:__else()? {
             let mut cond = cond;
             Type::convert(&mut cond, &Type::bool());
             Global::get().allow_return_sugar = sugar;
-            format!("if {} {{\n{}\n}}", cond.value, body)
+            format!("if {} {{\n{}\n}}{}", cond.value, body, match else_ {
+                None => String::new(),
+                Some(body) => format!(" else {{\n{body}\n}}")
+            })
         }
 
         // `while` statement

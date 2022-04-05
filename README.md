@@ -1,8 +1,5 @@
 # Rusty-C
-## Rusty-C is a Cargo crate designed to convert legacy C to modern Rust.
-### Usage:
-Add `rusty-c` of last version to your dependencies and use it:
-
+## Rusty-C is a program designed to convert legacy C to modern Rust.
 ### Example:
 
 main.c
@@ -12,18 +9,14 @@ int fibonacci(int n) {
 }
 ```
 
-main.rs
-```rust
-use rusty_c::prelude::*;
+Start translation:
 
-include_c!(code.c);
-
-fn main() {
-    println!("{}", fibonacci(9)) // 55
-}
+```commandline
+rusty-c main.c --gnu-search
 ```
 
 The C code above is translated into Rust equivalent:
+main.rs
 ```rust
 fn fibonacci(n: i32) -> i32 {
     if n < 2 {
