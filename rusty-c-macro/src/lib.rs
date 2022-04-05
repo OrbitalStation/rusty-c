@@ -4,15 +4,6 @@
 use clap::{App, AppSettings, Arg};
 use std::process::{Command, Stdio};
 
-#[cfg(not(feature = "debug"))]
-macro_rules! modules {
-    ($( $mod:ident )*) => { $(
-        mod $mod;
-        use $mod::*;
-    )* };
-}
-
-#[cfg(feature = "debug")]
 macro_rules! modules {
     ($( $mod:ident )*) => { $(
         mod $mod;
@@ -22,31 +13,7 @@ macro_rules! modules {
 
 modules!(tools r#macro ty fun expr preprocessor global extra r#const lines_cut);
 
-#[cfg(not(feature = "debug"))]
-use proc_macro::TokenStream;
-
-#[cfg(not(feature = "debug"))]
-#[proc_macro]
-pub fn include_c(args: TokenStream) -> TokenStream {
-    prepare(args.to_string());
-
-    let result = include_file();
-
-    if Global::get().print_result {
-        println!("{}", result);
-    }
-
-    result.parse().unwrap()
-}
-
-#[cfg(feature = "debug")]
-pub fn include_c(args: &str) {
-    prepare(format!("\"{}\"", args));
-
-    println!("{}", include_file());
-}
-
-fn prepare(args: String) {
+pub fn launch() {
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let /*mut*/ file /*= &Global::get().file*/;
@@ -66,9 +33,6 @@ fn prepare(args: String) {
         default_panic(info)
     }));
 
-    assert!(args.chars().next().unwrap() == '"' && args.chars().next_back().unwrap() == '"', "input should be enclosed in quotes");
-    let args = &args[1..args.len() - 1];
-
     let matches = App::new("rusty-c")
         .setting(AppSettings::NoBinaryName)
         .arg(Arg::new("file")
@@ -80,7 +44,7 @@ fn prepare(args: String) {
         .arg(Arg::new("gnu search")
             .long("gnu-search")
             .alias("gcc-search"))
-        .get_matches_from(args.split_whitespace());
+        .get_matches_from(std::env::args().skip(1));
 
     let global = Global::get();
 
@@ -108,7 +72,15 @@ fn prepare(args: String) {
 
     Type::add_builtins();
 
-    Macro::predefine_all()
+    Macro::predefine_all();
+
+    let result = include_file();
+
+    if Global::get().print_result {
+        println!("{}", result);
+    }
+
+    std::fs::write(std::path::Path::new(matches.value_of("file").unwrap()).with_extension("rs"), result).unwrap()
 }
 
 pub(crate) fn include_only_preprocess(file: &str) -> String {

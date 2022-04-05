@@ -5,6 +5,3 @@ edition = "2021"
 
 [dependencies.rusty-c-macro]
 path = "rusty-c-macro"
-
-[features]
-debug = ["rusty-c-macro/debug"]
